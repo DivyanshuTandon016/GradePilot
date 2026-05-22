@@ -22,7 +22,13 @@ type LineBucket = {
   items: Array<{ x: number; text: string }>;
 };
 
-const SEMESTER_PATTERN = /\b(Spring|Summer|Fall|Winter)\s+(20\d{2})\b/i;
+type TranscriptLine = {
+  y: number;
+  text: string;
+};
+
+const SEMESTER_PATTERN =
+  /\b(?:(Spring|Summer|Fall|Winter)\s+(20\d{2})|(20\d{2})\s+(Spring|Summer|Fall|Winter))\b/i;
 const GRADE_PATTERN =
   /(?:^|\s)(A\+|A-|A|B\+|B-|B|C\+|C|D|E\/F|E|F|W|P|X|Y|I)(?=\s|$)/i;
 const COURSE_CODE_PATTERN = /\b[A-Z]{2,}[A-Z0-9-]*\s*\d{2,}[A-Z0-9-]*\b/;
@@ -38,6 +44,18 @@ const normalizeLine = (line: string) =>
     .replace(/\s+([,;:])/g, '$1')
     .trim();
 
+const semesterFromLine = (line: string) => {
+  const match = line.match(SEMESTER_PATTERN);
+
+  if (!match) {
+    return '';
+  }
+
+  const season = match[1] ?? match[4];
+  const year = match[2] ?? match[3];
+  return `${season} ${year}`;
+};
+
 const cleanCourseName = (line: string) =>
   normalizeLine(
     line
@@ -46,7 +64,7 @@ const cleanCourseName = (line: string) =>
       .replace(/[|]+/g, ' '),
   ).replace(/^[,;:\-]+|[,;:\-]+$/g, '');
 
-const pageLinesFromItems = (items: TextItem[]) => {
+const linesForColumn = (items: TextItem[]) => {
   const buckets: LineBucket[] = [];
 
   items.forEach((item) => {
@@ -70,15 +88,28 @@ const pageLinesFromItems = (items: TextItem[]) => {
 
   return buckets
     .sort((left, right) => right.y - left.y)
-    .map((line) =>
-      normalizeLine(
+    .map((line) => ({
+      y: line.y,
+      text: normalizeLine(
         line.items
           .sort((left, right) => left.x - right.x)
           .map((item) => item.text)
           .join(' '),
       ),
-    )
-    .filter(Boolean);
+    }))
+    .filter((line) => Boolean(line.text));
+};
+
+const pageColumnsFromItems = (items: TextItem[], pageWidth: number) => {
+  const columns = [[], []] as TextItem[][];
+  const pageMidpoint = pageWidth / 2;
+
+  items.forEach((item) => {
+    const x = Number(item.transform[4] ?? 0);
+    columns[x < pageMidpoint ? 0 : 1].push(item);
+  });
+
+  return columns.map(linesForColumn).filter((column) => column.length > 0);
 };
 
 const creditMatchFor = (line: string) =>
@@ -102,8 +133,7 @@ const parseCourseLine = (
   fallbackSemester: string,
 ): CompletedCourse | null => {
   const normalized = normalizeLine(line);
-  const semesterMatch = normalized.match(SEMESTER_PATTERN);
-  const semester = semesterMatch?.[0] ?? fallbackSemester;
+  const semester = semesterFromLine(normalized) || fallbackSemester;
   const gradeMatch = normalized.match(GRADE_PATTERN);
   const grade = gradeMatch ? normalizeGrade(gradeMatch[1]) : null;
   const creditMatch = creditMatchFor(normalized);
@@ -159,16 +189,21 @@ export const parseTranscriptPdf = async (file: File): Promise<PdfParseResult> =>
   const document = await getDocument({
     data: new Uint8Array(await file.arrayBuffer()),
   }).promise;
-  const lines: string[] = [];
+  const pages: TranscriptLine[][] = [];
 
   for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
     const page = await document.getPage(pageNumber);
     const textContent = await page.getTextContent();
     const textItems = textContent.items.filter(isTextItem);
-    lines.push(...pageLinesFromItems(textItems));
+    pages.push(
+      ...pageColumnsFromItems(
+        textItems,
+        page.getViewport({ scale: 1 }).width,
+      ),
+    );
   }
 
-  if (lines.length === 0) {
+  if (pages.length === 0) {
     return {
       courses: [],
       errors: [
@@ -177,16 +212,26 @@ export const parseTranscriptPdf = async (file: File): Promise<PdfParseResult> =>
     };
   }
 
-  let currentSemester = '';
-  const courses = lines.flatMap((line) => {
-    const semesterMatch = line.match(SEMESTER_PATTERN);
+  const courses = pages.flatMap((lines) => {
+    let currentSemester = '';
+    const columnCourses: CompletedCourse[] = [];
 
-    if (semesterMatch) {
-      currentSemester = semesterMatch[0];
-    }
+    lines.forEach((line) => {
+      currentSemester = semesterFromLine(line.text) || currentSemester;
 
-    const course = parseCourseLine(line, currentSemester);
-    return course ? [course] : [];
+      if (/Repeat\s*-\s*Excluded/i.test(line.text)) {
+        columnCourses.pop();
+        return;
+      }
+
+      const course = parseCourseLine(line.text, currentSemester);
+
+      if (course) {
+        columnCourses.push(course);
+      }
+    });
+
+    return columnCourses;
   });
   const uniqueCourses = dedupeCourses(courses);
 
