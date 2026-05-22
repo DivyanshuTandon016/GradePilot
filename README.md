@@ -5,6 +5,12 @@ students. It combines completed course history with current semester assumptions
 to calculate GPA, quality points, graded credits, and what-if outcomes without a
 login or database in the first version.
 
+## Live Site
+
+Open GradePilot here:
+
+https://divyanshutandon016.github.io/GradePilot/
+
 ## Features
 
 - Landing page with a direct path into the GPA workspace
